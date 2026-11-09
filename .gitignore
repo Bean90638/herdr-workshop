@@ -1,0 +1,26 @@
+# 個人 Herdr 設定與執行狀態
+/shared.json
+/view.json
+/settings.json
+/window.json
+/windows.json
+/seen.json
+/installed.json
+/data/
+
+# Herdr 模組的本機開發輔助檔
+**/mods/*/jsconfig.json
+**/mods/*/gpui-kit.d.ts
+
+# 開發環境、暫存與分享產物
+/.claude/
+/.agents/
+.DS_Store
+Thumbs.db
+*.log
+*.error
+*.tmp
+*.zip
+.env
+.env.*
+!.env.example
