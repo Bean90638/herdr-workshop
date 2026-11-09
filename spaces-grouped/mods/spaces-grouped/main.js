@@ -26,6 +26,8 @@ function place(s, ps) {
   return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
 }
 const rowHeight = ({ tree }) => (tree ? 28 : 30);
+const RAIL_CELL = 32;
+const railCell = (el) => h_flex().flex_none().justify_center().child(el);
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
@@ -84,7 +86,7 @@ export default class Spaces extends View {
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
-    if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
+    if (sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -256,12 +258,17 @@ export default class Spaces extends View {
     openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
   }
 
+  orderingDue(now) {
+    return this.ordering && now - this.ordering.at >= 1000
+      && this.ordering.machines.every(name => machines().some(m => m.name === name && m.layout === "ready"));
+  }
+
   // Spaces in order, each worktree space moved under its main checkout's.
   ordered() {
     const sp = spaces(), ps = panes();
     const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
     for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
-    const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null })).filter((r) => this.shown.has(r.w.id));
+    const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null }));
     const mains = new Set(list.filter((r) => r.g && !r.g.linked).map((r) => r.g.repo));
     const nested = (r) => r.g?.linked && mains.has(r.g.repo);
     const out = [];
@@ -274,11 +281,36 @@ export default class Spaces extends View {
       const kids = list.filter((k) => nested(k) && k.g.repo === r.g.repo);
       kids.forEach((k, n) => out.push({ ...k, tree: n === kids.length - 1 ? "└─" : "├─" }));
     }
-    return out;
+    // 先按機器與群組攤平，讓原生快捷鍵、窄側欄與展開的群組清單共用順序。
+    // 收合只隱藏列，不將工作區排除於原生導覽之外。
+    const state = this.groupState();
+    const machineOrder = [null, ...[...new Set(sp.map(w => w.machine).filter(Boolean))].sort()];
+    const grouped = machineOrder.flatMap(machine => this.groupOrder(state, machine).flatMap(id =>
+      out.filter(r => (r.w.machine ?? null) === machine && this.groupOf(r.w.id, state) === id)));
+    out.splice(0, out.length, ...grouped);
+    // 模擬每次移動，讓後續索引包含前面的調整；同步衝突則等待回報後重試。
+    const order = sp.map(w => w.id);
+    const target = out.map(r => r.w.id);
+    const key = JSON.stringify([order, target, machines()]);
+    if (order.every((id, i) => id === target[i])) {
+      this.ordering = null;
+    } else if (this.ordering?.key !== key || this.orderingDue(Date.now())) {
+      const moved = new Set();
+      this.ordering = { key, at: Date.now(), machines: [] };
+      for (let i = 0; i < out.length; i++) {
+        const from = order.indexOf(out[i].w.id);
+        if (from === i) continue;
+        run("space.move", { id: out[i].w.id, index: i + 1 });
+        moved.add(out[i].w.machine ?? null);
+        order.splice(i, 0, order.splice(from, 1)[0]);
+      }
+      this.ordering.machines = [...moved];
+    }
+    return out.filter(r => this.shown.has(r.w.id));
   }
 
   // The rows, under a header per machine once one isn't this computer.
-  machineGrouped(t, collapsed) {
+  grouped(t, collapsed) {
     const rows = this.ordered();
     const draw = (r) => (collapsed ? this.compact(r, t) : this.row(r, t));
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
@@ -287,8 +319,8 @@ export default class Spaces extends View {
       return layout === "loading" || (!layout && this.machines.some(k => k.name === m && k.state === "connected"))
         || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
-    const loadingRow = m => div().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(8).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
-    if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : rows.map(draw);
+    const loadingRow = m => h_flex().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).items_center().when(collapsed, el => el.justify_center()).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
+    if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : (collapsed ? rows.map(draw) : this.customGroups(t, rows));
     const machineNames = [null, ...remote];
     return machineNames.flatMap((m) => {
       const mine = rows.filter((r) => (r.w.machine ?? null) === m);
@@ -297,14 +329,18 @@ export default class Spaces extends View {
       const connected = !m || machine?.state === "connected";
       const rebuilt = this.rebuilt(machine) || !!repair;
       const folded = this.folded.has(m);
-      const head = h_flex().id(`machine-${m ?? "local"}`).h(26).flex_none().px(collapsed ? 2 : 8).gap(7).items_center().text_size(11).text_color(t.dim)
+      const icon = svg(`mods/workspace-chrome/${m ? "server" : "monitor"}.svg`).size(13).flex_none();
+      const badge = div().absolute().right(-3).bottom(-2).size(6).rounded(3).border_1().border_color(t.chrome).bg(connected ? t.ansi2 : t.dim);
+      const head = h_flex().id(`machine-${m ?? "local"}`).h(26).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().text_size(11).text_color(t.dim)
+        .when(collapsed, el => el.mt(4).w(RAIL_CELL).justify_center().rounded(6).tooltip(m ? `${m} · ${connected ? "connected" : (machine?.state ?? "asleep").replace(/_/g, " ")}` : "This computer"))
         .cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_e, cx) => {
           folded ? this.folded.delete(m) : this.folded.add(m);
           localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
           cx.notify();
         })
-        .child(svg(`mods/workspace-chrome/${m ? "server" : "monitor"}.svg`).size(13).flex_none())
+        .when(!collapsed, el => el.child(icon))
+        .when(collapsed, el => el.child(div().relative().flex_none().child(icon).when(Boolean(m), el => el.child(badge))))
         .when(!collapsed, el => el.child(div().flex_1().truncate().child(m ?? "This computer"))
           .when(!connected && !rebuilt, el => el.child(div().flex_none().child((machine?.state ?? "asleep").replace(/_/g, " "))))
           .when(rebuilt, el => el.child(h_flex().flex_none().gap(3).items_center()
@@ -314,16 +350,26 @@ export default class Spaces extends View {
               .tooltip(repair?.error || "This machine was rebuilt or replaced. Click to connect to the new one.")
               .on_click((_e, cx) => { cx.stop_propagation(); this.reconnect(machine, cx); })
               .child(repair?.busy ? "Connecting…" : "Connect"))))
+          .child(this.groupIcon(`machine-group-add-${m ?? "local"}`, "在此機器新增群組", "mods/workspace-chrome/folder-plus.svg", cx => this.editGroup("new", cx, m), t))
           .when(connected, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
             .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child("+")))
           .child(div().size(6).rounded(3).flex_none().bg(connected ? t.ansi2 : t.dim))
           .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none()));
-      const empty = h_flex().id(`machine-new-${m ?? "local"}`).h(28).flex_none().px(8).gap(7).items_center().rounded(7)
+      const empty = h_flex().id(`machine-new-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().rounded(7)
         .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
         .on_click(() => run("space.new", { machine: m ?? "" }))
-        .child(svg("mods/workspace-chrome/plus.svg").size(12)).when(!collapsed, el => el.child("New space there"));
+        .when(collapsed, el => el.w(RAIL_CELL).rounded(6).justify_center().tooltip(`New space on ${m ?? "this computer"}`)
+          .child(h_flex().size(18).rounded(5).border_1().border_color(t.dim).items_center().justify_center()
+            .child(svg("mods/workspace-chrome/plus.svg").size(10))))
+        .when(!collapsed, el => el.child(svg("mods/workspace-chrome/plus.svg").size(12)).child("New space there"));
       if (!collapsed && rebuilt) return [head];
-      return [head, ...(folded ? [] : mine.length ? mine.map(draw) : [loading(m) ? loadingRow(m) : empty])];
+      const cell = collapsed ? railCell : (el) => el;
+      const hasGroups = this.groupState().groups.some(g => (g.machine ?? null) === m);
+      // 沒有 Space 時沿用原版入口位置，不插入空的未分類與拖曳區。
+      const content = collapsed ? (mine.length ? mine.map(draw) : [loading(m) ? loadingRow(m) : cell(empty)])
+        : mine.length ? this.customGroups(t, mine, m)
+          : [loading(m) ? loadingRow(m) : empty, ...(hasGroups ? this.customGroups(t, mine, m) : [])];
+      return [cell(head), ...(folded ? [] : content)];
     });
   }
 
@@ -335,10 +381,12 @@ export default class Spaces extends View {
 
   groupOf(id, state = this.groupState()) {
     const group = state.members[id];
-    return state.groups.some(g => g.id === group) ? group : "uncategorized";
+    const machine = spaces().find(s => s.id === id)?.machine ?? null;
+    return state.groups.some(g => g.id === group && (g.machine ?? null) === machine) ? group : "uncategorized";
   }
 
-  editGroup(id, cx) {
+  editGroup(id, cx, machine = null) {
+    this.editorMachine = machine;
     this.editor = id;
     this.confirmDelete = null;
     this.groupError = "";
@@ -351,12 +399,12 @@ export default class Spaces extends View {
     if (this.editor === null) return;
     const name = this.groupInput.value().trim();
     const state = this.groupState();
-    if (!name || name === "\u672a\u5206\u985e" || state.groups.some(g => g.id !== this.editor && g.name === name)) {
+    if (!name || name === "\u672a\u5206\u985e" || state.groups.some(g => g.id !== this.editor && g.name === name && (g.machine ?? null) === (this.editorMachine ?? null))) {
       this.groupError = "\u8acb\u8f38\u5165\u4e0d\u91cd\u8907\u7684\u7fa4\u7d44\u540d\u7a31";
       cx.notify();
       return;
     }
-    if (this.editor === "new") state.groups.push({ id: `group-${Date.now()}-${Math.random().toString(36).slice(2)}`, name });
+    if (this.editor === "new") state.groups.push({ id: `group-${Date.now()}-${Math.random().toString(36).slice(2)}`, name, machine: this.editorMachine ?? null });
     else state.groups = state.groups.map(g => g.id === this.editor ? { ...g, name } : g);
     setShared("spaces-grouped.v1", state);
     this.editor = null;
@@ -373,13 +421,22 @@ export default class Spaces extends View {
     cx.notify();
   }
 
-  beginDrag(kind, id, event) {
-    this.drag = { kind, id, start: event.position, moved: false };
+  foldKey(id, machine) {
+    return machine ? JSON.stringify([machine, id]) : id;
+  }
+
+  beginDrag(kind, id, event, machine = null) {
+    this.drag = { kind, id, machine, start: event.position, moved: false };
     this.drop = null;
   }
 
-  hoverDrop(kind, id, event, cx) {
+  hoverDrop(kind, id, event, cx, machine = null) {
     if (!this.drag) return;
+    if (this.drag.machine !== machine) {
+      this.drop = null;
+      cx.notify();
+      return;
+    }
     // 拖曳群組時，群組內的 Space 也屬於該群組的放置區。
     const overSpace = this.drag.kind === "group" && kind === "space";
     if (overSpace) {
@@ -391,27 +448,32 @@ export default class Spaces extends View {
     this.drag.moved = true;
     const after = overSpace || (event.local_position?.y ?? 0) >= (event.bounds?.height ?? 29) / 2;
     if (this.drop?.kind !== kind || this.drop?.id !== id || this.drop?.after !== after) {
-      this.drop = { kind, id, after };
+      this.drop = { kind, id, after, machine };
       cx.notify();
     }
   }
 
-  hoverEnd(event, cx) {
+  hoverEnd(event, cx, machine = null) {
     if (!this.drag) return;
+    if (this.drag.machine !== machine) {
+      this.drop = null;
+      cx.notify();
+      return;
+    }
     const state = this.groupState();
-    const group = this.groupOrder(state).slice(-1)[0];
-    const rows = this.ordered().filter(r => this.groupOf(r.w.id, state) === group);
+    const group = this.groupOrder(state, machine).slice(-1)[0];
+    const rows = this.ordered().filter(r => (r.w.machine ?? null) === this.drag.machine && this.groupOf(r.w.id, state) === group);
     const last = rows.slice(-1)[0];
     const kind = this.drag.kind === "space" && last ? "space" : "group";
     const id = kind === "space" ? last.w.id : group;
     // 下方空白區一律代表最後一組末尾，不依空白區的上下半部判斷。
-    this.hoverDrop(kind, id, { ...event, local_position: { y: 1 }, bounds: { height: 1 } }, cx);
+    this.hoverDrop(kind, id, { ...event, local_position: { y: 1 }, bounds: { height: 1 } }, cx, this.drag.machine);
   }
 
   groupDropChangesPosition(id) {
     const sourceId = this.drag?.id;
     if (!sourceId || sourceId === id) return false;
-    const order = this.groupOrder(this.groupState());
+    const order = this.groupOrder(this.groupState(), this.drag.machine);
     const from = order.indexOf(sourceId);
     const remaining = order.filter(group => group !== sourceId);
     const to = remaining.indexOf(id);
@@ -425,7 +487,7 @@ export default class Spaces extends View {
     const state = this.groupState();
     const group = this.groupOf(id, state);
     if (this.groupOf(sourceId, state) !== group) return true;
-    const rows = this.ordered().filter(r => this.groupOf(r.w.id, state) === group);
+    const rows = this.ordered().filter(r => (r.w.machine ?? null) === this.drag.machine && this.groupOf(r.w.id, state) === group);
     const source = rows.find(r => r.w.id === sourceId)?.w;
     const destination = rows.find(r => r.w.id === id)?.w;
     if (!source || !destination || (source.machine ?? null) !== (destination.machine ?? null)) return false;
@@ -436,7 +498,7 @@ export default class Spaces extends View {
     return slot !== from;
   }
 
-  finishDrag(kind, id, cx) {
+  finishDrag(kind, id, cx, machine = null) {
     const drag = this.drag;
     const target = this.drop;
     if (drag?.kind === "group" && kind === "space") {
@@ -446,12 +508,14 @@ export default class Spaces extends View {
     this.drag = null;
     this.drop = null;
     if (!drag) return;
+    if (drag.machine !== machine) { cx.notify(); return; }
     if (!drag.moved) {
       if (drag.kind === kind && drag.id === id) {
         if (kind === "space") run("space.select", { id });
         else {
           const state = this.groupState();
-          state.folded[id] = !state.folded[id];
+          const key = this.foldKey(id, machine);
+          state.folded[key] = !state.folded[key];
           setShared("spaces-grouped.v1", state);
         }
       }
@@ -462,13 +526,13 @@ export default class Spaces extends View {
     const state = this.groupState();
     if (drag.kind === "group" && kind === "group" && drag.id !== id) {
       // \u672a\u5206\u985e\u4e5f\u4fdd\u5b58\u6392\u5e8f\u4f4d\u7f6e\uff0c\u4f46\u4e0d\u53ef\u522a\u9664\u6216\u6539\u540d\u3002
-      const order = this.groupOrder(state);
+      const order = this.groupOrder(state, machine);
       const from = order.indexOf(drag.id), to = order.indexOf(id);
       if (from >= 0 && to >= 0) {
         order.splice(from, 1);
         const slot = order.indexOf(id) + (target.after ? 1 : 0);
         order.splice(slot, 0, drag.id);
-        state.order = order;
+        state.order = [...state.order.filter(key => !order.includes(key)), ...order];
       }
     } else if (drag.kind === "space") {
       const group = kind === "group" ? id : this.groupOf(id, state);
@@ -489,8 +553,8 @@ export default class Spaces extends View {
     cx.notify();
   }
 
-  groupOrder(state) {
-    const ids = ["uncategorized", ...state.groups.map(g => g.id)];
+  groupOrder(state, machine = null) {
+    const ids = ["uncategorized", ...state.groups.filter(g => (g.machine ?? null) === machine).map(g => g.id)];
     const saved = shared("spaces-grouped.v1")?.order ?? [];
     return [...new Set([...saved.filter(id => ids.includes(id)), ...ids])];
   }
@@ -513,66 +577,77 @@ export default class Spaces extends View {
       .child(svg(path).size(13));
   }
 
-  grouped(t, collapsed) {
-    const rows = this.ordered();
-    if (collapsed) return rows.map(r => this.compact(r, t));
+  customGroups(t, rows, machine = null) {
+    const prefix = machine ?? "local";
     const state = this.groupState();
-    const order = this.groupOrder(state);
-    const groupDrop = this.drag?.kind === "group" && this.drag.moved && this.drop?.kind === "group"
+    const order = this.groupOrder(state, machine);
+    const groupDrop = this.drag?.machine === machine && this.drop?.machine === machine && this.drag?.kind === "group" && this.drag.moved && this.drop?.kind === "group"
       && this.groupDropChangesPosition(this.drop.id);
     const boundary = groupDrop ? order.indexOf(this.drop.id) + (this.drop.after ? 1 : 0) : -1;
-    return order.flatMap((id, index) => {
+    const sections = order.flatMap((id, index) => {
       const group = state.groups.find(g => g.id === id);
       const name = group?.name ?? "\u672a\u5206\u985e";
       const mine = rows.filter(r => this.groupOf(r.w.id, state) === id);
-      const folded = !!state.folded[id];
-      const activeDrop = this.drag?.moved && this.drop?.kind === "group" && this.drop.id === id;
+      const folded = !!state.folded[this.foldKey(id, machine)];
+      const activeDrop = this.drag?.moved && this.drop?.machine === machine && this.drop?.kind === "group" && this.drop.id === id;
       const sorting = this.drag?.kind === "group";
       const insertBefore = boundary === index;
       const insertAtEnd = boundary === order.length && index === order.length - 1;
-      const header = h_flex().id(`group-${id}`).h(29).flex_none().px(7).gap(5).items_center().rounded(5)
+      const header = h_flex().id(`group-${prefix}-${id}`).h(29).flex_none().px(7).gap(5).items_center().rounded(5)
         .text_size(11.5).text_color(activeDrop && !sorting ? t.accent : t.muted).cursor_pointer()
         .bg(activeDrop && !sorting ? t.selected : t.chrome).hover(s => s.bg(t.hover))
         .when(this.drag?.kind === "group" && this.drag.id === id && this.drag.moved, el => el.opacity(0.5))
-        .on_mouse_down("left", (e) => this.beginDrag("group", id, e))
-        .on_mouse_move((e, cx) => this.hoverDrop("group", id, e, cx))
-        .on_mouse_up("left", (_e, cx) => { cx.stop_propagation(); this.finishDrag("group", id, cx); })
+        .on_mouse_down("left", (e) => this.beginDrag("group", id, e, machine))
+        .on_mouse_move((e, cx) => this.hoverDrop("group", id, e, cx, machine))
+        .on_mouse_up("left", (_e, cx) => { cx.stop_propagation(); this.finishDrag("group", id, cx, machine); })
         .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none())
-        .child(div().id(`group-label-${id}`).flex_1().truncate()
+        .child(div().id(`group-label-${prefix}-${id}`).flex_1().truncate()
           .tooltip("\u9ede\u64ca\u6536\u5408\uff1b\u62d6\u66f3\u6392\u5e8f\uff1b\u5c07 Space \u62d6\u5230\u6b64\u8655\u53ef\u79fb\u5165\u7fa4\u7d44").child(name))
         .child(div().text_size(10).text_color(t.dim).child(String(mine.length)))
         .when(!!group, el => el
-          .child(this.groupIcon(`rename-${id}`, "\u91cd\u65b0\u547d\u540d\u7fa4\u7d44", "mods/workspace-chrome/square-pen.svg", cx => this.editGroup(id, cx), t))
-          .child(this.groupIcon(`delete-${id}`, "\u522a\u9664\u7fa4\u7d44", "mods/spaces-grouped/trash.svg", cx => { this.confirmDelete = id; this.editor = null; cx.notify(); }, t)));
+          .child(this.groupIcon(`rename-${prefix}-${id}`, "\u91cd\u65b0\u547d\u540d\u7fa4\u7d44", "mods/workspace-chrome/square-pen.svg", cx => this.editGroup(id, cx, machine), t))
+          .child(this.groupIcon(`delete-${prefix}-${id}`, "\u522a\u9664\u7fa4\u7d44", "mods/spaces-grouped/trash.svg", cx => { this.confirmDelete = id; this.editor = null; cx.notify(); }, t)));
       const output = [header];
       if (this.confirmDelete === id) output.push(v_flex().px(7).py(5).gap(4).flex_none().text_size(11).text_color(t.foreground)
         .child("\u522a\u9664\u6b64\u7fa4\u7d44\uff1fSpace \u5c07\u79fb\u56de\u672a\u5206\u985e\u3002")
         .child(h_flex().gap(5)
-          .child(this.groupButton(`confirm-${id}`, "\u78ba\u8a8d\u522a\u9664", cx => this.deleteGroup(id, cx), t))
-          .child(this.groupButton(`cancel-${id}`, "\u53d6\u6d88", cx => { this.confirmDelete = null; cx.notify(); }, t))));
-      if (!folded) {
+          .child(this.groupButton(`confirm-${prefix}-${id}`, "\u78ba\u8a8d\u522a\u9664", cx => this.deleteGroup(id, cx), t))
+          .child(this.groupButton(`cancel-${prefix}-${id}`, "\u53d6\u6d88", cx => { this.confirmDelete = null; cx.notify(); }, t))));
+      if (folded) {
+        // 保留目前工作區，讓快捷鍵切換後仍能辨識位置，不改動收合偏好。
+        output.push(...mine.filter(r => r.w.active).map(r => this.row({ ...r, tree: null }, t)));
+      } else {
         if (mine.length) {
           const spaceDrop = this.drag?.kind === "space" && this.drag.moved && this.drop?.kind === "space"
             && this.spaceDropChangesPosition(this.drop.id);
           const target = spaceDrop ? mine.findIndex(r => r.w.id === this.drop.id) : -1;
           const slot = target >= 0 ? target + (this.drop.after ? 1 : 0) : -1;
           // 相同落點共用下一列頂線；只有群組末尾使用最後一列底線。
-          output.push(...mine.map((r, rowIndex) => this.row({ ...r, tree: null,
+          output.push(...mine.map((r, rowIndex) => this.row({ ...r, tree: r.tree && mine.some(parent => parent.g && !parent.g.linked && parent.g.repo === r.g?.repo) ? r.tree : null,
             insertBefore: slot === rowIndex,
             insertAtEnd: slot === mine.length && rowIndex === mine.length - 1 }, t)));
         }
-        else output.push(div().id(`empty-${id}`).h(28).flex_none().px(22).text_size(11).text_color(t.dim)
-          .on_mouse_move((e, cx) => this.hoverDrop("group", id, e, cx))
-          .on_mouse_up("left", (_e, cx) => { cx.stop_propagation(); this.finishDrag("group", id, cx); })
+        else output.push(div().id(`empty-${prefix}-${id}`).h(28).flex_none().px(22).text_size(11).text_color(t.dim)
+          .on_mouse_move((e, cx) => this.hoverDrop("group", id, e, cx, machine))
+          .on_mouse_up("left", (_e, cx) => { cx.stop_propagation(); this.finishDrag("group", id, cx, machine); })
           .child("\u62d6\u66f3 Space \u81f3\u6b64"));
       }
       // 同一落點統一畫在下一組頂端，避免前組底線與後組頂線相差線寬。
-      const section = v_flex().id(`group-section-${id}`).relative().flex_none().children(output);
+      const section = v_flex().id(`group-section-${prefix}-${id}`).relative().flex_none().children(output);
       if (insertBefore || insertAtEnd) section.child(div().absolute().left(0).right(0).h(2).bg(t.accent)
         .when(insertAtEnd, line => line.bottom(0))
         .when(insertBefore, line => line.top(0)));
       return [section];
     });
+    sections.push(div().id(`groups-end-${prefix}`).h(28).flex_none()
+      .on_mouse_move((e, cx) => this.hoverEnd(e, cx, machine))
+      .on_mouse_up("left", (e, cx) => {
+        cx.stop_propagation();
+        this.hoverEnd(e, cx, machine);
+        const target = this.drop;
+        this.finishDrag(target?.kind, target?.id, cx, machine);
+      }));
+    return sections;
   }
 
   // Only what's unusual, after the name: "herdr \u00b7 spike \u21912 \u21931". The repo or
@@ -617,11 +692,11 @@ export default class Spaces extends View {
         div().absolute().left(0).right(0).h(2).bg(t.accent)
           .when(insertAtEnd, line => line.bottom(0))
           .when(insertBefore, line => line.top(0))))
-      .on_mouse_down("left", e => this.beginDrag("space", w.id, e))
-      .on_mouse_move((e, cx) => this.hoverDrop("space", w.id, e, cx))
+      .on_mouse_down("left", e => this.beginDrag("space", w.id, e, w.machine ?? null))
+      .on_mouse_move((e, cx) => this.hoverDrop("space", w.id, e, cx, w.machine ?? null))
       .on_mouse_up("left", (_e, cx) => {
         cx.stop_propagation();
-        this.finishDrag("space", w.id, cx);
+        this.finishDrag("space", w.id, cx, w.machine ?? null);
       })
       .on_mouse_down("right", () => this.menu(w))
       .child(
@@ -636,17 +711,19 @@ export default class Spaces extends View {
   }
 
   compact({ w, i }, t) {
-    return h_flex()
+    return railCell(h_flex()
       .id(`space-${w.id}`)
+      .relative()
+      .w(RAIL_CELL)
       .h(26)
-      .flex_none()
+      .rounded(6)
       .justify_center()
-      .gap(4)
-      .when(w.active, (el) => el.bg(t.raised))
-      .hover((s) => s.bg(t.hover))
+      .items_center()
+      .when(w.active, (el) => el.bg(t.selected))
+      .when(!w.active, (el) => el.hover((s) => s.bg(t.hover)))
       .on_click(() => run("space.select", { id: w.id }))
       .child(div().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
-      .child(div().text_color(tone(t, w.status)).child(glyph(w.status)));
+      .child(div().absolute().right(5).text_color(tone(t, w.status)).child(glyph(w.status))));
   }
 
   render() {
@@ -666,33 +743,19 @@ export default class Spaces extends View {
     if (changed) setShared("space.colors", kept);
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
+        .when(collapsed, el => el.pl(0).pr(0).justify_center())
         .when(!collapsed, el => el.child(div().flex_1().child("工作區"))
           .child(this.groupIcon("group-new", "新增群組", "mods/workspace-chrome/folder-plus.svg", cx => this.editGroup("new", cx), t)))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
-          .tooltip("新增 Space").on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
+          .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
       .when(!collapsed && this.editor !== null, el => el.child(v_flex().px(12).pb(7).gap(4).flex_none()
         .child(Input.new(this.groupInput).h(30).px(7).rounded(5).border_1().border_color(t.accent).bg(t.background).text_color(t.foreground))
         .when(!!this.groupError, box => box.child(div().text_size(11).text_color(t.blocked).child(this.groupError)))
         .child(h_flex().gap(5)
           .child(this.groupButton("group-save", "儲存", cx => this.saveGroup(cx), t))
           .child(this.groupButton("group-cancel", "取消", cx => { this.editor = null; cx.notify(); }, t)))))
-      .on_mouse_down_out((_e, cx) => { if (this.drag) { this.drag = null; this.drop = null; cx.notify(); } })
-      .child(v_flex().flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar().mode("always")
-        .children(this.grouped(t, collapsed))
-        .when(!collapsed, el => el.child(div().id("spaces-drop-end").min_h(28).flex_1()
-          .on_mouse_move((e, cx) => this.hoverEnd(e, cx))
-          .on_mouse_up("left", (e, cx) => {
-            cx.stop_propagation();
-            this.hoverEnd(e, cx);
-            const target = this.drop;
-            this.finishDrag(target?.kind, target?.id, cx);
-          }))))
-      .on_mouse_up("left", (_e, cx) => {
-        if (this.drag) {
-          this.drag = null;
-          this.drop = null;
-          cx.notify();
-        }
-      });
+      .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
+        .on_mouse_up("left", (_e, cx) => { this.drag = null; this.drop = null; cx.notify(); })
+        .children(this.grouped(t, collapsed)));
   }
 }

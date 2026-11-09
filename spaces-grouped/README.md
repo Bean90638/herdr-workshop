@@ -12,6 +12,8 @@ Collapsible groups for the Herdr Space sidebar. Organize workspaces with drag an
 
 - Create, rename, delete, and collapse groups. New spaces start in Uncategorized.
 - Drag spaces between groups, reorder spaces on the same machine, and reorder groups.
+- Synchronizes group order within each machine with Herdr's native workspace order, so `Ctrl + Shift + PageUp / PageDown` follows the displayed order.
+- Collapsed groups still show the currently active space as a single row. Switching spaces updates that row without expanding the group or changing its saved collapse preference.
 - Insertion lines indicate placement. No line appears when a same-group space would stay in place.
 - Drop in the blank area below the list to target the final group’s end.
 - Deleting a group requires confirmation and returns its members to Uncategorized without closing terminals.
@@ -63,12 +65,13 @@ Uncategorized cannot be renamed or deleted. Names cannot be blank, duplicated, o
 
 ## Requirements and Limitations
 
-- Based on shipped `spaces` 0.1.12. Requires compatible Herdr mod APIs; compatibility with every version is not guaranteed.
+- Based on Herdr App 0.1.14's shipped `spaces` mod, provided by `mods/spaces/` in the local Herdr configuration directory; this project does not keep a separate copy. Requires compatible Herdr mod APIs; compatibility with every version is not guaranteed.
 - Uses `gpui-kit`, `gpui-base`, `herdr`, shipped `menu`, and `workspace-chrome` icons. No other custom mods are required.
 - Below a sidebar width of 160px, compact mode hides group management.
-- Cross-machine drops change membership only, not core ordering. Exact placement is not guaranteed. Worktree ordering retains the original logic and needs additional testing for special cases.
+- Machines form the first level, with groups inside each machine. Cross-machine drops are rejected; remote work environments are not moved. Each machine heading has its own add-group button. Groups belong to a machine, and different machines may use the same group name. Legacy groups without a machine are treated as local, preserving existing data; collapse state is separate for each machine.
+- Retains the original worktree ordering. Parent and child spaces keep tree indentation when in the same group; spaces in different groups are displayed independently.
 - Full drag auto-scroll, release outside the window, and keyboard dragging are not implemented.
-- Runs Git queries, watches local Git directories, and queries machine status. Remote queries may use existing connections. Retained machine-reconnect code has no visible entry point.
+- Runs Git queries, watches local Git directories, and queries machine status. Remote queries may use existing connections. Retains the original machine headings, connection status, reconnect flow after a machine rebuild, and controls for creating a space on a specific machine.
 
 ## Files and Development
 
