@@ -65,13 +65,15 @@ Uncategorized cannot be renamed or deleted. Names cannot be blank, duplicated, o
 
 ## Requirements and Limitations
 
-- Based on Herdr App 0.1.14's shipped `spaces` mod, provided by `mods/spaces/` in the local Herdr configuration directory; this project does not keep a separate copy. Requires compatible Herdr mod APIs; compatibility with every version is not guaranteed.
+- Built on Herdr App 0.1.16's shipped `spaces` mod, provided by `mods/spaces/` in the local Herdr configuration directory; this project does not keep a separate copy. Requires compatible Herdr mod APIs; compatibility with every version is not guaranteed.
+- Inherits the new base's lighter queries: Git refs are read without scanning the worktree, at most six places are checked at once, and local Git folder watches are cancelled and released when no space shows that repo. This keeps the sidebar cheap with large repositories.
+- The new base scrolls the active space back into view when another block pushes it out. With groups expanded the list's direct children are group sections, so it scrolls to the group holding the active space rather than to the exact row; compact mode and a list without custom groups keep row-level behaviour.
 - Uses `gpui-kit`, `gpui-base`, `herdr`, shipped `menu`, and `workspace-chrome` icons. No other custom mods are required.
 - Below a sidebar width of 160px, compact mode hides group management.
 - Machines form the first level, with groups inside each machine. Cross-machine drops are rejected; remote work environments are not moved. Each machine heading has its own add-group button. Groups belong to a machine, and different machines may use the same group name. Legacy groups without a machine are treated as local, preserving existing data; collapse state is separate for each machine.
 - Retains the original worktree ordering. Parent and child spaces keep tree indentation when in the same group; spaces in different groups are displayed independently.
 - Full drag auto-scroll, release outside the window, and keyboard dragging are not implemented.
-- Runs Git queries, watches local Git directories, and queries machine status. Remote queries may use existing connections. Retains the original machine headings, connection status, reconnect flow after a machine rebuild, and controls for creating a space on a specific machine.
+- Runs Git queries, watches local Git directories, and queries machine status. Remote queries may use existing connections. Retains the original machine headings, connection status, reconnect flow after a machine rebuild, controls for creating a space on a specific machine, and the login guidance (`hc machine login <machine>`) and disconnect warning introduced by the new base.
 
 ## Files and Development
 
