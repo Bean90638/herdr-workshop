@@ -42,7 +42,7 @@ mods/spaces-grouped/
   trash.svg
 ```
 
-Start from a personal clone of shipped `spaces` version 0.1.12. The main class extends `View` from `gpui-kit`, using `div` and `svg`, plus `v_flex`, `h_flex`, `InputState`, and `Input` from `gpui-base`. No custom props are required. Set `mod.json` to `place: "none"` and `title: "Spaces"`, with `cloned_from` recording the source name and version.
+Start from a personal clone of shipped `spaces` version 0.1.16 and add the group layer on top; keep the rest of the shipped mod as it is. The main class extends `View` from `gpui-kit`, using `div` and `svg`, plus `v_flex`, `h_flex`, `ScrollHandle`, `InputState`, and `Input` from `gpui-base`. No custom props are required. Set `mod.json` to `place: "none"` and `title: "Spaces"`, with `cloned_from` recording the source name and version (`spaces` 0.1.16).
 
 In the user's personal layout, change the existing Space node's `content.mod` from `spaces` to `spaces-grouped`. Preserve other nodes and properties. Do not depend on custom `tabs-graph` or `git-graph` mods. Use the shipped `menu` mod and `workspace-chrome` icons: chevrons, folder-plus, plus, and square-pen. Use this mod's `trash.svg` for deletion.
 
@@ -50,14 +50,16 @@ Import `spaces`, `machines`, `panes`, `run`, `openOverlay`, `exec`, `hc`, `theme
 
 Store group state under `spaces-grouped.v1`: `groups` contains IDs and names, `members` maps Space IDs to group IDs, `folded` stores collapse flags, and `order` contains group IDs. Missing or invalid memberships fall back to `uncategorized`. Remove invalid IDs from the group order, deduplicate it, and append missing groups. Store avatar colors under `space.colors`.
 
-Retain the original Git and machine-information logic. Use `exec` for `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v2 --branch` and `rev-parse` queries. Watch local Git directories with `watchFolder`. Check for needed updates every 250ms, query machines every 15 seconds, and perform fallback Git refreshes after 60 seconds when needed while the window is active. Query `machine ls --json` through the `hc` API. Preserve the original worktree ordering and brief Git-information wait for new spaces.
+Retain the shipped Git and machine-information logic, including its ref-only reads (`rev-parse --path-format=absolute --show-toplevel`, `rev-parse --git-common-dir`, `symbolic-ref -q HEAD`, `rev-list --left-right --count HEAD...@{upstream}`), which never scan the worktree; the paired runs, six places at a time; `watchFolder` with `cancel()` for local Git directories, kept in a repo-to-promise map and cancelled when no space shows that repo; the 250ms due check, the 15-second machine query, and the 60-second fallback refresh while the window is active. Query `machine ls --json` through the `hc` API. Preserve the original worktree ordering, the brief Git-information wait for new spaces, the scroll handle that brings the active space into view, and the machine heading's login guidance (`hc machine login <machine>`, copyable) and disconnect warning.
 
 ## Watch out
 
 - Use native GPUI JavaScript, not DOM, HTML, or Node.js. The recipient's installed `gpui-kit.d.ts` and `herdr.d.ts` are the API authority.
+- **Keep every callback inside the engine's script budget.** A `render` or event handler that runs longer than about 50ms of wall time is interrupted by the engine and the view shows "This view could not be re-rendered" with the detail `interrupted`. Nothing is cached between renders, so read the world once per render and pass it down: `spaces()` (which copies every space with its tabs), `panes()`, `machines()` and `shared()` must not be called per row or per group. Build a `space id -> machine` map once and give it to `groupOf` instead of letting it call `spaces()` again. Dragging re-renders on every pointer move, so a render that is only slightly over budget fails there first.
 - Theme colors and fonts come from Herdr. The preview is a dark interface illustration, not a pixel-accurate screenshot or a guarantee for every theme.
 - Do not distribute shared state, machine configuration, workspaces, or terminal content.
 - Retained machine-reconnect code has no visible entry point. Do not advertise it as an accessible control.
+- The shipped scroll handle brings the active space into view by its index among the list's direct children. With groups expanded those children are group sections, so the list scrolls to the group that holds the active space rather than to the row; compact mode and a list with no custom groups keep the shipped row-level behaviour.
 - Same-machine ordering uses core order while the display retains the original worktree ordering. Special worktree and mixed-machine cases need additional testing. Cross-machine insertion indicators do not guarantee exact row placement.
 - Do not claim full drag auto-scroll, release-outside-window handling, or keyboard dragging; these are not fully implemented and verified.
 - Compact mode hides group management. Hide group insertion indicators when removing the source and reinserting it at the target slot would preserve its index, including adjacent headings, member rows, and the bottom blank area.
@@ -76,4 +78,5 @@ These are acceptance checks for a build, not a claim that every item has already
 7. Groups can move before or after other groups. Hide the insertion line when a drop would preserve the group order, including adjacent headings, member rows, and the bottom blank area. Insertion indicators do not change section heights.
 8. Pencil and trash tooltips do not flicker against the group-collapse tooltip.
 9. Narrowing the sidebar shows numbered rows and agent-status symbols; widening it restores groups.
-10. Manually verify mixed-machine cases, worktrees, and different themes on the recipient's version. An initial check alone does not establish interaction correctness.
+10. Dragging a space and dragging a group heading show no "This view could not be re-rendered" banner, with every group expanded and many spaces listed.
+11. Manually verify mixed-machine cases, worktrees, and different themes on the recipient's version. An initial check alone does not establish interaction correctness.
